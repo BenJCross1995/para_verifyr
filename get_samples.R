@@ -189,6 +189,20 @@ add_text_to_metadata <- function(base_data, metadata){
     return(result)
 }
 
+filter_zero_paraphrases <- function(unknown, ref){
+  
+  ref_doc_count <- ref |>
+    group_by(sample_id, doc_id, chunk_id, subchunk_id, author_id, topic_id) |>
+    summarise(num_paraphrases = n())
+  
+  unknown_updated <- unknown |>
+    inner_join(ref_doc_count, by = c('sample_id', 'doc_id', 'chunk_id', 'subchunk_id',
+                                     'author_id', 'topic_id')) |>
+    select(-num_paraphrases)
+  
+  return(unknown_updated)
+}
+
 sample_doc_to_corpus <- function(df, samp){
   corpus_object <- df |> 
     filter(sample_id == samp) |>
@@ -199,16 +213,14 @@ sample_doc_to_corpus <- function(df, samp){
   return(corpus_object)
 }
 
-# Define the function to calculate min-max similarity
+x_y_info <- get_x_y_info(guardian_base, guardian_phi)
+
 min_max_similarity <- function(row1, row2) {
   min_vals <- pmin(row1, row2)
   max_vals <- pmax(row1, row2)
   similarity <- sum(min_vals) / sum(max_vals)
   return(similarity)
 }
-
-x_y_info <- get_x_y_info(guardian_base, guardian_phi)
-
 
 known_docs_metadata <- x_y_info$x
 unknown_docs_metadata <- x_y_info$y
@@ -224,9 +236,7 @@ ref_docs <- guardian_phi |>
          author_id.x, topic_id, text) |>
   rename('author_id' = 'author_id.x')
 
-ref_docs |> head(2)
-known_docs |> head(2)
-unknown_docs |> head(2)
+unknown_updated <- filter_zero_paraphrases(unknown_docs, ref_docs)
 
 impostor_algorithm <- function(known, unknown, ref, n_rep, save_loc = NULL){
   
@@ -238,7 +248,6 @@ impostor_algorithm <- function(known, unknown, ref, n_rep, save_loc = NULL){
   result_df <- data.frame()
   for(sample_id in samples){
     
-    print(sample_id)
     # Filter the docs for the correct sample_id and convert to a corpus
     known_corp <- sample_doc_to_corpus(known, sample_id)
     unknown_corp <- sample_doc_to_corpus(unknown, sample_id)
@@ -290,9 +299,8 @@ impostor_algorithm <- function(known, unknown, ref, n_rep, save_loc = NULL){
         # Get the number of paraphrases in order to set a score multiplier
         num_subset_ref_sentences <- ndoc(dfm_ref_subset)
         score_multiplier <- num_subset_ref_sentences / num_total_ref_sentences
-        
+
         score_d_known <- 0
-        score_rep_vec <- c()
         
         # Repeat a number of times set by the user
         for(k in 1:n_rep){
@@ -320,23 +328,23 @@ impostor_algorithm <- function(known, unknown, ref, n_rep, save_loc = NULL){
           # Get the rank of the unknown doc
           pos <- ranking[1]
           
-          # Get the score for each repition and add it to the repition vector
+          # Increment the score with each repetition
           score_d_known <- score_d_known + 1 / (n_rep * pos)
-          score_rep_vec <- c(score_rep_vec, score_d_known)
           
         }
         
-        # Aggregate the repetition score and add it to the sentence vector. This is 
-        # the storage for the sentence in known vs each sentence in unknown
-        final_score <- mean(score_rep_vec) * score_multiplier
-        print(paste0("Sample: ", sample_id, " Sentence: ", i, " Unknown Sentence: ", j, " Final Score: ", final_score))
+        # Multiply the score by the score_multiplier and add it to the vectore with scores for all sentences
+        final_score <- score_d_known * score_multiplier
+        print(paste0("Sample: ", sample_id, " - Sentence: ", i, " - Unknown Sentence: ", j, " - Score Before Multiplier: ", score_d_known, " - Final Score: ", final_score))
         score_vec <- c(score_vec, final_score)
       }
       
       
       # Now we get the score for sentence i vs the entire unknown document
+      # I am summing instead of averaging as i'm essentially doing a weighted average by
+      # multiplying by the score_multiplier
       sentence_score <- sum(score_vec)
-      print(paste0("Sample: ", sample_id, " Sentence: ", i, " Sentence Score: ", sentence_score))
+      print(paste0("Sample: ", sample_id, " - Sentence: ", i, " - Sentence Score: ", sentence_score))
       
       # Compute same_author value based on the sentence score
       if (sentence_score < 0.5) {
@@ -360,6 +368,6 @@ impostor_algorithm <- function(known, unknown, ref, n_rep, save_loc = NULL){
 }
 
 
-result <- impostor_algorithm(known_docs, unknown_docs, ref_docs, n_rep = 2, save_loc = "./results.csv")
+result <- impostor_algorithm(known_docs, unknown_updated, ref_docs, n_rep = 10, save_loc = "./guardian_phi_results_10_reps.csv")
 result
 
