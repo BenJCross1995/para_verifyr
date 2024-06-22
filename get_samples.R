@@ -398,9 +398,10 @@ sample_docs <- unknown_updated |>
   arrange(total_combinations) |>
   head(2) |>
   pull(sample_id)
+
 sample_docs <- c(22)
+
 n_rep <- 2
-known_docs %>% filter(sample_id == 9)
 
 #-----IMPOSTOR ALGORITHM STARTS HERE-----#
 impostor_algorithm_parallel <- function(known, unknown, ref, n_rep){
@@ -473,29 +474,22 @@ impostor_algorithm_parallel <- function(known, unknown, ref, n_rep){
           unknown_matched <- dfm_match(dfm_unknown_subset, selected_feats)
           ref_matched <- dfm_match(dfm_ref_subset, selected_feats)
          
-          #TODO - TEST THIS TRIMMING FUNCTION TO CHECK IF IT WORKS OKAY
+          # Remove any columns with just zeros, score would be zero anyway
+          trimmed_k_vs_u <- dfm_trim(rbind(known_matched, unknown_matched),
+                                     min_termfreq = 1,
+                                     termfreq_type = 'count')
           
           # Remove any columns with just zeros, score would be zero anyway
-          trimmed_feats <- dfm_trim(rbind(known_matched, unknown_matched),
-                                    min_termfreq = 1,
-                                    termfreq_type = 'count') |>
-            names()
-          
-          # Remove any columns with just zeros, score would be zero anyway
-          trimmed_ref_feats <- dfm_trim(rbind(known_matched, ref_matched),
-                                        min_termfreq = 1,
-                                        termfreq_type = 'count') |>
-            names()
-          
+          trimmed_k_vs_ref <- dfm_trim(rbind(known_matched, ref_matched),
+                                       min_termfreq = 1,
+                                       termfreq_type = 'count')
           
           # Calculate the unknown score and create a vector of reference scores
-          score_unknown <- min_max_similarity(as.numeric(known_matched[1, ]),
-                                              as.numeric(unknown_matched[1, ]))
+          score_unknown <- min_max_similarity(trimmed_k_vs_u[1, ],
+                                              trimmed_k_vs_u[2, ])
           
-          score_ref <- apply(ref_matched,
-                             1,
-                             function(row) min_max_similarity(as.numeric(known_matched[1, ]),
-                                                              as.numeric(row)))
+          score_ref <- apply(trimmed_k_vs_ref[-1,], 1,
+                             function(row) min_max_similarity(trimmed_k_vs_ref[1, ], row))
           
           # Combine reference score with unknown scores and rank them. Using ties.method = 'min'
           # carries out skip ranking
@@ -509,6 +503,7 @@ impostor_algorithm_parallel <- function(known, unknown, ref, n_rep){
           score_d_known <- score_d_known + 1 / (n_rep * pos)
           
         }
+        print(paste0("Sample: ", samp, " - Sentence: ", i, " Known Sentence: ", j, " - Sentence Score: ", score_d_known))
         # This is similar to return(final_score)
         score_vec <- c(score_vec, score_d_known)
       }
