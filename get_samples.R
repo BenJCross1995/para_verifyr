@@ -5,6 +5,7 @@ suppressPackageStartupMessages({
   library(quanteda)
   library(foreach)
   library(doParallel)
+  library(tidyr)
 })
 
 google_drive_loc <- "G:/My Drive/"
@@ -203,6 +204,25 @@ sample_doc_to_corpus <- function(df, samp){
   return(corpus_object)
 }
 
+docs_to_corpus <- function(df){
+  corpus_object <- df |> 
+    mutate(index = row_number()) |>
+    relocate(index) |>
+    corpus(text_field = 'text', docid_field = 'index')
+  
+  return(corpus_object) 
+}
+
+top_n_features <- function(known_dfm, unknown_dfm, n_feats = 10000){
+  
+  top_feats <- sort(quanteda::featfreq(rbind(known_dfm, unknown_dfm)), decreasing = TRUE) |>
+    utils::head(n_feats) |>
+    names()
+  
+  return(top_feats)
+  
+}
+
 min_max_similarity <- function(row1, row2) {
   min_vals <- pmin(row1, row2)
   max_vals <- pmax(row1, row2)
@@ -378,10 +398,12 @@ sample_docs <- unknown_updated |>
   arrange(total_combinations) |>
   head(2) |>
   pull(sample_id)
-
+sample_docs <- c(22)
 n_rep <- 2
+known_docs %>% filter(sample_id == 9)
 
-impostor_algorithm_parallel <- function(known, unknown, ref, n_rep, save_loc = NULL){
+#-----IMPOSTOR ALGORITHM STARTS HERE-----#
+impostor_algorithm_parallel <- function(known, unknown, ref, n_rep){
   
   # Initialise parallel processing
   cl <- setup_parallel_backend()
@@ -392,223 +414,88 @@ impostor_algorithm_parallel <- function(known, unknown, ref, n_rep, save_loc = N
     pull(sample_id) |>
     unique()
   
-  result_df <- data.frame()
-  for(sample_id in samples){
-    print(sample_id)
-    # Filter the docs for the correct sample_id and convert to a corpus
-    known_corp <- sample_doc_to_corpus(known, sample_id)
-    unknown_corp <- sample_doc_to_corpus(unknown, sample_id)
-    ref_corp <- sample_doc_to_corpus(ref, sample_id)
-    
-    # Get the dfm matrix for each corpus
-    dfm_known <- character_n_grams(known_corp)
-    dfm_unknown <- character_n_grams(unknown_corp)
-    dfm_ref <- character_n_grams(ref_corp)
-    
-    # Get all of the known doc features, we will use 50% of these in the
-    # result
-    known_feats <- colnames(dfm_known)
-    
-    # Get the number of sentences in the known and unknown corpus
-    num_known_sentence <- ndoc(known_corp)
-    num_unknown_sentence <- ndoc(unknown_corp)
-    num_total_ref_sentences <- ndoc(ref_corp)
-    
-    # Create vectors of FALSE, we will replace each element with TRUE in a 
-    # loop to subset the dfms
-    base_known_false <- rep(FALSE, num_known_sentence)
-    base_unknown_false <- rep(FALSE, num_unknown_sentence)
-    
-    result_df_sample <- data.frame()
-    foreach(i = 1:num_known_sentence,
-            .combine = rbind,
-            .packages = c('foreach', 'quanteda'),
-            .export = c("min_max_similarity")) %dopar% {
-      
-      # subset the known dfm
-      updated_known_false <- replace(base_known_false, i, TRUE)
-      dfm_known_subset <- dfm_subset(dfm_known, updated_known_false)
-      known_docvars <- docvars(dfm_known_subset[1,])
-      
-      score_vec <- numeric(0)
-      
-      score_vec <- foreach(j = 1:num_unknown_sentence,
-                           .combine = "c",
-                           .packages = c('foreach', 'quanteda'),
-                           .export = c("min_max_similarity")) %dopar% {
-        
-        # Subset the unknown dfm as we will be looping through this
-        updated_unknown_false <- replace(base_unknown_false, j, TRUE)
-        dfm_unknown_subset <- dfm_subset(dfm_unknown, updated_unknown_false)
-        
-        # Now we grab the chunk and subchunk from the docvars of the subset
-        docvar_selection <- docvars(dfm_unknown_subset[1,])
-        unknown_chunk_id <- docvar_selection$chunk_id
-        unknown_subchunk_id <- docvar_selection$subchunk_id
-        
-        # Use this info to subset the reference dfm
-        dfm_ref_subset <- dfm_subset(dfm_ref, chunk_id == unknown_chunk_id & subchunk_id == unknown_subchunk_id)
-        
-        # Get the number of paraphrases in order to set a score multiplier
-        num_subset_ref_sentences <- ndoc(dfm_ref_subset)
-        score_multiplier <- num_subset_ref_sentences / num_total_ref_sentences
-        
-        score_d_known <- 0
-        
-        # Repeat a number of times set by the user
-        for(k in 1:n_rep){
-          
-          # Select 50% of features
-          selected_feats <- sample(known_feats, size = length(known_feats) / 2)
-          
-          # Match the dfms with these features
-          known_matched <- dfm_match(dfm_known_subset, selected_feats)
-          unknown_matched <- dfm_match(dfm_unknown_subset, selected_feats)
-          ref_matched <- dfm_match(dfm_ref_subset, selected_feats)
-          
-          # Calculate the unknown score and create a vector of reference scores
-          score_unknown <- min_max_similarity(as.numeric(known_matched[1,]),
-                                              as.numeric(unknown_matched[1, ]))
-          
-          score_ref <- apply(ref_matched, 1, function(row) min_max_similarity(as.numeric(known_matched[1,]),
-                                                                              as.numeric(row)))
-          
-          # Combine reference score with unknown scores and rank them. Using ties.method = 'min'
-          # carries out skip ranking
-          all_scores <- c(score_unknown, score_ref)
-          ranking <- rank(-all_scores, ties.method = "min")
-          
-          # Get the rank of the unknown doc
-          pos <- ranking[1]
-          
-          # Increment the score with each repetition
-          score_d_known <- score_d_known + 1 / (n_rep * pos)
-          
-        }
-        
-        # Multiply the score by the score_multiplier and add it to the vectore with scores for all sentences
-        final_score <- score_d_known * score_multiplier
-
-        # This is similar to return(final_score)
-        final_score
-      }
-      
-      
-      # Now we get the score for sentence i vs the entire unknown document
-      # I am summing instead of averaging as i'm essentially doing a weighted average by
-      # multiplying by the score_multiplier
-      sentence_score <- sum(score_vec)
-      print(paste0("Sample: ", sample_id, " - Sentence: ", i, " - Sentence Score: ", sentence_score))
-      
-      # Compute same_author value based on the sentence score
-      if (sentence_score < 0.5) {
-        same_author <- 0
-      } else if (sentence_score == 0.5) {
-        same_author <- 0.5
-      } else {
-        same_author <- 1
-      }
-      
-      result_df_sample <- cbind(known_docvars, sentence_score, same_author)
-      result_df <- rbind(result_df, result_df_sample)
-    }
-    
-    # Save after each document
-    if (!is.null(save_loc)) {
-      write.csv(result_df, file = save_loc, row.names = FALSE)
-    }
-  }
-  stop_parallel_backend(cl)
-  return(result_df)
-}
-
-impostor_algorithm_parallel_unknown <- function(known, unknown, ref, n_rep, save_loc = NULL){
+  # Filter the docs for the correct sample_id and convert to a corpus
+  # Then convert to a dfm
+  dfm_known <- character_n_grams(docs_to_corpus(known))
+  dfm_unknown <- character_n_grams(docs_to_corpus(unknown))
+  dfm_ref <- character_n_grams(docs_to_corpus(ref))
   
-  # Initialise parallel processing
-  cl <- setup_parallel_backend()
-  
-  # Get a list of the sample id's
-  samples <- known |>
-  filter(sample_id %in% sample_docs) |>
-  pull(sample_id) |>
-  unique()
+  # Get the top features from the known and unknown docs, we will use 50% of these
+  top_features <- top_n_features(dfm_known, dfm_unknown, n_feats = 10000)
   
   result_df <- data.frame()
   
-  for(sample_id in samples){
-    print(sample_id)
-    # Filter the docs for the correct sample_id and convert to a corpus
-    known_corp <- sample_doc_to_corpus(known, sample_id)
-    unknown_corp <- sample_doc_to_corpus(unknown, sample_id)
-    ref_corp <- sample_doc_to_corpus(ref, sample_id)
+  for(samp in samples){
     
-    # Get the dfm matrix for each corpus
-    dfm_known <- character_n_grams(known_corp)
-    dfm_unknown <- character_n_grams(unknown_corp)
-    dfm_ref <- character_n_grams(ref_corp)
+    print(paste0("Document ", which(samples == samp), " Out Of ", length(samples)))
     
-    # Get all of the known doc features, we will use 50% of these in the
-    # result
-    known_feats <- colnames(dfm_known)
+    dfm_known_sample <- dfm_subset(dfm_known, sample_id == samp)
+    dfm_unknown_sample <- dfm_subset(dfm_unknown, sample_id == samp)
+    dfm_ref_sample <- dfm_subset(dfm_ref, sample_id == samp)
     
     # Get the number of sentences in the known and unknown corpus
-    num_known_sentence <- ndoc(known_corp)
-    num_unknown_sentence <- ndoc(unknown_corp)
-    num_total_ref_sentences <- ndoc(ref_corp)
+    num_known_sentence <- ndoc(dfm_known_sample)
+    num_unknown_sentence <- ndoc(dfm_unknown_sample)
     
-    # Create vectors of FALSE, we will replace each element with TRUE in a 
-    # loop to subset the dfms
-    base_known_false <- rep(FALSE, num_known_sentence)
-    base_unknown_false <- rep(FALSE, num_unknown_sentence)
+    # We want the result displayed for each unknown sentence
+    for(i in 1:num_unknown_sentence){
+      
+      dfm_unknown_subset <- dfm_unknown_sample[i,]
+      
+      # Return the docvars which will be used to filter the reference data
+      unknown_docvars <- docvars(dfm_unknown_subset[1,])
+      unknown_chunk_id <- unknown_docvars$chunk_id
+      unknown_subchunk_id <- unknown_docvars$subchunk_id
+      
+      # Get the reference data from the docvars of the unknown data
+      dfm_ref_subset <- dfm_subset(dfm_ref_sample,
+                                   chunk_id == unknown_chunk_id &
+                                     subchunk_id == unknown_subchunk_id)
 
-    for(i in 1:num_known_sentence){
-      # subset the known dfm
-      updated_known_false <- replace(base_known_false, i, TRUE)
-      dfm_known_subset <- dfm_subset(dfm_known, updated_known_false)
-      known_docvars <- docvars(dfm_known_subset[1,])
-      
       score_vec <- numeric(0)
-      
-      score_vec <- foreach(j = 1:num_unknown_sentence,
-                           .combine = "c",
-                           .packages = c('foreach', 'quanteda'),
-                           .export = c("min_max_similarity")) %dopar% {
+
+      for(j in 1:num_known_sentence){
         
-        # Subset the unknown dfm as we will be looping through this
-        updated_unknown_false <- replace(base_unknown_false, j, TRUE)
-        dfm_unknown_subset <- dfm_subset(dfm_unknown, updated_unknown_false)
+        dfm_known_subset <- dfm_known_sample[j,]
         
         # Now we grab the chunk and subchunk from the docvars of the subset
-        docvar_selection <- docvars(dfm_unknown_subset[1,])
-        unknown_chunk_id <- docvar_selection$chunk_id
-        unknown_subchunk_id <- docvar_selection$subchunk_id
-        
-        # Use this info to subset the reference dfm
-        dfm_ref_subset <- dfm_subset(dfm_ref, chunk_id == unknown_chunk_id & subchunk_id == unknown_subchunk_id)
-        
-        # Get the number of paraphrases in order to set a score multiplier
-        num_subset_ref_sentences <- ndoc(dfm_ref_subset)
-        score_multiplier <- num_subset_ref_sentences / num_total_ref_sentences
+        known_docvars <- docvars(dfm_known_subset[1,])
         
         score_d_known <- 0
         
-        # Repeat a number of times set by the user
         for(k in 1:n_rep){
           
           # Select 50% of features
-          selected_feats <- sample(known_feats, size = length(known_feats) / 2)
+          selected_feats <- sample(top_features, size = length(top_features) / 2)
           
           # Match the dfms with these features
           known_matched <- dfm_match(dfm_known_subset, selected_feats)
           unknown_matched <- dfm_match(dfm_unknown_subset, selected_feats)
           ref_matched <- dfm_match(dfm_ref_subset, selected_feats)
+         
+          #TODO - TEST THIS TRIMMING FUNCTION TO CHECK IF IT WORKS OKAY
+          
+          # Remove any columns with just zeros, score would be zero anyway
+          trimmed_feats <- dfm_trim(rbind(known_matched, unknown_matched),
+                                    min_termfreq = 1,
+                                    termfreq_type = 'count') |>
+            names()
+          
+          # Remove any columns with just zeros, score would be zero anyway
+          trimmed_ref_feats <- dfm_trim(rbind(known_matched, ref_matched),
+                                        min_termfreq = 1,
+                                        termfreq_type = 'count') |>
+            names()
+          
           
           # Calculate the unknown score and create a vector of reference scores
-          score_unknown <- min_max_similarity(as.numeric(known_matched[1,]),
+          score_unknown <- min_max_similarity(as.numeric(known_matched[1, ]),
                                               as.numeric(unknown_matched[1, ]))
           
-          score_ref <- apply(ref_matched, 1, function(row) min_max_similarity(as.numeric(known_matched[1,]),
-                                                                              as.numeric(row)))
+          score_ref <- apply(ref_matched,
+                             1,
+                             function(row) min_max_similarity(as.numeric(known_matched[1, ]),
+                                                              as.numeric(row)))
           
           # Combine reference score with unknown scores and rank them. Using ties.method = 'min'
           # carries out skip ranking
@@ -622,158 +509,15 @@ impostor_algorithm_parallel_unknown <- function(known, unknown, ref, n_rep, save
           score_d_known <- score_d_known + 1 / (n_rep * pos)
           
         }
-        
-        # Multiply the score by the score_multiplier and add it to the vectore with scores for all sentences
-        final_score <- score_d_known * score_multiplier
-    
         # This is similar to return(final_score)
-        final_score
+        score_vec <- c(score_vec, score_d_known)
       }
-      
-      
-    # Now we get the score for sentence i vs the entire unknown document
-    # I am summing instead of averaging as i'm essentially doing a weighted average by
-    # multiplying by the score_multiplier
-    sentence_score <- sum(score_vec)
-    print(paste0("Sample: ", sample_id, " - Sentence: ", i, " - Sentence Score: ", sentence_score))
-      
-    # Compute same_author value based on the sentence score
-    if (sentence_score < 0.5) {
-      same_author <- 0
-    } else if (sentence_score == 0.5) {
-      same_author <- 0.5
-    } else {
-      same_author <- 1
-    }
-      
-    sentence_info <- cbind(known_docvars, sentence_score, same_author)
-    result_df <- rbind(result_df, sentence_info)
-    }
-    
-  # Save after each document
-  if (!is.null(save_loc)) {
-    write.csv(result_df, file = save_loc, row.names = FALSE)
-  }
-  }
-    stop_parallel_backend(cl)
-    return(result_df)
-}
-
-impostor_algorithm_parallel_sentence <- function(known, unknown, ref, n_rep, save_loc = NULL){
-  
-  # Initialise parallel processing
-  cl <- setup_parallel_backend()
-  
-  # Get a list of the sample id's
-  samples <- known |>
-    filter(sample_id %in% sample_docs) |>
-    pull(sample_id) |>
-    unique()
-  
-  result_df <- data.frame()
-  
-  
-  for(sample_id in samples){
-    
-    print(paste0("Document ", which(samples == sample_id), " Out Of ", length(samples)))
-    # Filter the docs for the correct sample_id and convert to a corpus
-    known_corp <- sample_doc_to_corpus(known, sample_id)
-    unknown_corp <- sample_doc_to_corpus(unknown, sample_id)
-    ref_corp <- sample_doc_to_corpus(ref, sample_id)
-    
-    # Get the dfm matrix for each corpus
-    dfm_known <- character_n_grams(known_corp)
-    dfm_unknown <- character_n_grams(unknown_corp)
-    dfm_ref <- character_n_grams(ref_corp)
-    
-    # Get all of the known doc features, we will use 50% of these in the
-    # result
-    known_feats <- colnames(dfm_known)
-    
-    # Get the number of sentences in the known and unknown corpus
-    num_known_sentence <- ndoc(known_corp)
-    num_unknown_sentence <- ndoc(unknown_corp)
-    num_total_ref_sentences <- ndoc(ref_corp)
-    
-    # Create vectors of FALSE, we will replace each element with TRUE in a 
-    # loop to subset the dfms
-    base_known_false <- rep(FALSE, num_known_sentence)
-    base_unknown_false <- rep(FALSE, num_unknown_sentence)
-    
-    # Parallelize over known sentences
-    sample_result_df <- foreach(i = 1:num_known_sentence, .combine = rbind, .packages = c('foreach', 'quanteda', 'dplyr', 'authorverifyr'), .export = c("min_max_similarity", "dfm_subset", "dfm_match", "ndoc")) %dopar% {
-      
-      # subset the known dfm
-      updated_known_false <- replace(base_known_false, i, TRUE)
-      dfm_known_subset <- dfm_subset(dfm_known, updated_known_false)
-      known_docvars <- docvars(dfm_known_subset[1,])
-      
-      score_vec <- numeric(0)
-      
-      score_vec <- foreach(j = 1:num_unknown_sentence, .combine = "c", .packages = c('foreach', 'quanteda'), .export = c("min_max_similarity")) %dopar% {
-        
-        # Subset the unknown dfm as we will be looping through this
-        updated_unknown_false <- replace(base_unknown_false, j, TRUE)
-        dfm_unknown_subset <- dfm_subset(dfm_unknown, updated_unknown_false)
-        
-        # Now we grab the chunk and subchunk from the docvars of the subset
-        docvar_selection <- docvars(dfm_unknown_subset[1,])
-        unknown_chunk_id <- docvar_selection$chunk_id
-        unknown_subchunk_id <- docvar_selection$subchunk_id
-        
-        # Use this info to subset the reference dfm
-        dfm_ref_subset <- dfm_subset(dfm_ref, chunk_id == unknown_chunk_id & subchunk_id == unknown_subchunk_id)
-        
-        # Get the number of paraphrases in order to set a score multiplier
-        num_subset_ref_sentences <- ndoc(dfm_ref_subset)
-        score_multiplier <- num_subset_ref_sentences / num_total_ref_sentences
-        
-        score_d_known <- 0
-        
-        # Repeat a number of times set by the user
-        for(k in 1:n_rep){
-          
-          # Select 50% of features
-          selected_feats <- sample(known_feats, size = length(known_feats) / 2)
-          
-          # Match the dfms with these features
-          known_matched <- dfm_match(dfm_known_subset, selected_feats)
-          unknown_matched <- dfm_match(dfm_unknown_subset, selected_feats)
-          ref_matched <- dfm_match(dfm_ref_subset, selected_feats)
-          
-          # Calculate the unknown score and create a vector of reference scores
-          score_unknown <- min_max_similarity(as.numeric(known_matched[1,]),
-                                              as.numeric(unknown_matched[1, ]))
-          
-          score_ref <- apply(ref_matched, 1, function(row) min_max_similarity(as.numeric(known_matched[1,]),
-                                                                              as.numeric(row)))
-          
-          # Combine reference score with unknown scores and rank them. Using ties.method = 'min'
-          # carries out skip ranking
-          all_scores <- c(score_unknown, score_ref)
-          ranking <- rank(-all_scores, ties.method = "min")
-          
-          # Get the rank of the unknown doc
-          pos <- ranking[1]
-          
-          # Increment the score with each repetition
-          score_d_known <- score_d_known + 1 / (n_rep * pos)
-          
-        }
-        
-        # Multiply the score by the score_multiplier and add it to the vectore with scores for all sentences
-        final_score <- score_d_known * score_multiplier
-        
-        # This is similar to return(final_score)
-        final_score
-      }
-      
       
       # Now we get the score for sentence i vs the entire unknown document
       # I am summing instead of averaging as i'm essentially doing a weighted average by
       # multiplying by the score_multiplier
-      sentence_score <- sum(score_vec)
-      print(paste0("Sample: ", sample_id, " - Sentence: ", i, " - Sentence Score: ", sentence_score))
+      sentence_score <- mean(score_vec)
+      print(paste0("Sample: ", samp, " - Sentence: ", i, " - Sentence Score: ", sentence_score))
       
       # Compute same_author value based on the sentence score
       if (sentence_score < 0.5) {
@@ -784,507 +528,23 @@ impostor_algorithm_parallel_sentence <- function(known, unknown, ref, n_rep, sav
         same_author <- 1
       }
       
-      sentence_info <- cbind(known_docvars, sentence_score, same_author)
+      sentence_info <- cbind(unknown_docvars, sentence_score, same_author)
       
       # Return the sentence information as rbind
-      sentence_info
-    }
-    result_df <- rbind(result_df, sample_result_df)
-    
-    # Save after each document
-    if (!is.null(save_loc)) {
-      write.csv(result_df, file = save_loc, row.names = FALSE)
+      result_df <- rbind(result_df, sentence_info)
     }
   }
   stop_parallel_backend(cl)
-  return(result_df)
-}
-
-impostor_algorithm_parallel_sample <- function(known, unknown, ref, n_rep, save_loc = NULL){
-  
-  # Initialise parallel processing
-  cl <- setup_parallel_backend()
-  
-  # Get a list of the sample id's
-  samples <- known |>
-    filter(sample_id %in% sample_docs) |>
-    pull(sample_id) |>
-    unique()
-  
-  result_df <- foreach(sample_id = samples,
-                       .combine = rbind,
-                       .packages = c('foreach', 'quanteda', 'dplyr', 'authorverifyr'),
-                       .export = c("sample_doc_to_corpus", "min_max_similarity")) %dopar% {
-
-    # Filter the docs for the correct sample_id and convert to a corpus
-    known_corp <- sample_doc_to_corpus(known, sample_id)
-    unknown_corp <- sample_doc_to_corpus(unknown, sample_id)
-    ref_corp <- sample_doc_to_corpus(ref, sample_id)
-    
-    # Get the dfm matrix for each corpus
-    dfm_known <- character_n_grams(known_corp)
-    dfm_unknown <- character_n_grams(unknown_corp)
-    dfm_ref <- character_n_grams(ref_corp)
-    
-    # Get all of the known doc features, we will use 50% of these in the
-    # result
-    known_feats <- colnames(dfm_known)
-    
-    # Get the number of sentences in the known and unknown corpus
-    num_known_sentence <- ndoc(known_corp)
-    num_unknown_sentence <- ndoc(unknown_corp)
-    num_total_ref_sentences <- ndoc(ref_corp)
-    
-    # Create vectors of FALSE, we will replace each element with TRUE in a 
-    # loop to subset the dfms
-    base_known_false <- rep(FALSE, num_known_sentence)
-    base_unknown_false <- rep(FALSE, num_unknown_sentence)
-    
-    sample_result_df <- data.frame()
-    
-    for(i in 1:num_known_sentence){
-      # subset the known dfm
-      updated_known_false <- replace(base_known_false, i, TRUE)
-      dfm_known_subset <- dfm_subset(dfm_known, updated_known_false)
-      known_docvars <- docvars(dfm_known_subset[1,])
-      
-      score_vec <- numeric(0)
-      
-      score_vec <- foreach(j = 1:num_unknown_sentence,
-                           .combine = "c",
-                           .packages = c('foreach', 'quanteda'),
-                           .export = c("min_max_similarity")) %dopar% {
-        # Subset the unknown dfm as we will be looping through this
-        updated_unknown_false <- replace(base_unknown_false, j, TRUE)
-        dfm_unknown_subset <- dfm_subset(dfm_unknown, updated_unknown_false)
-                             
-        # Now we grab the chunk and subchunk from the docvars of the subset
-        docvar_selection <- docvars(dfm_unknown_subset[1,])
-        unknown_chunk_id <- docvar_selection$chunk_id
-        unknown_subchunk_id <- docvar_selection$subchunk_id
-                             
-        # Use this info to subset the reference dfm
-        dfm_ref_subset <- dfm_subset(dfm_ref, chunk_id == unknown_chunk_id & subchunk_id == unknown_subchunk_id)
-                             
-        # Get the number of paraphrases in order to set a score multiplier
-        num_subset_ref_sentences <- ndoc(dfm_ref_subset)
-        score_multiplier <- num_subset_ref_sentences / num_total_ref_sentences
-                             
-        score_d_known <- 0
-                             
-        # Repeat a number of times set by the user
-        for(k in 1:n_rep){
-                               
-          # Select 50% of features
-          selected_feats <- sample(known_feats, size = length(known_feats) / 2)
-                               
-          # Match the dfms with these features
-          known_matched <- dfm_match(dfm_known_subset, selected_feats)
-          unknown_matched <- dfm_match(dfm_unknown_subset, selected_feats)
-          ref_matched <- dfm_match(dfm_ref_subset, selected_feats)
-                               
-          # Calculate the unknown score and create a vector of reference scores
-          score_unknown <- min_max_similarity(as.numeric(known_matched[1,]),
-                                              as.numeric(unknown_matched[1, ]))
-                               
-          score_ref <- apply(ref_matched, 1, function(row) min_max_similarity(as.numeric(known_matched[1,]),
-                                                                                                   as.numeric(row)))
-                               
-          # Combine reference score with unknown scores and rank them. Using ties.method = 'min'
-          # carries out skip ranking
-          all_scores <- c(score_unknown, score_ref)
-          ranking <- rank(-all_scores, ties.method = "min")
-                               
-          # Get the rank of the unknown doc
-          pos <- ranking[1]
-                               
-          # Increment the score with each repetition
-          score_d_known <- score_d_known + 1 / (n_rep * pos)
-                               
-        }
-                             
-        # Multiply the score by the score_multiplier and add it to the vectore with scores for all sentences
-        final_score <- score_d_known * score_multiplier
-                             
-        # This is similar to return(final_score)
-        final_score
-      }
-      
-      
-      # Now we get the score for sentence i vs the entire unknown document
-      # I am summing instead of averaging as i'm essentially doing a weighted average by
-      # multiplying by the score_multiplier
-      sentence_score <- sum(score_vec)
-
-      # Compute same_author value based on the sentence score
-      if (sentence_score < 0.5) {
-        same_author <- 0
-      } else if (sentence_score == 0.5) {
-        same_author <- 0.5
-      } else {
-        same_author <- 1
-      }
-      
-      sentence_info <- cbind(known_docvars, sentence_score, same_author)
-      sample_result_df <- rbind(sample_result_df, sentence_info)
-    }
-    
-    # Save after each document
-    if (!is.null(save_loc)) {
-      write.csv(result_df, file = save_loc, row.names = FALSE)
-    }
-    
-    # Return the sample_result_df
-    sample_result_df
-    
-    }
-  
-  # Stop the parallel backend
-  stop_parallel_backend(cl)
-  
-  return(result_df)
-}
-
-impostor_algorithm_parallel_3_loops <- function(known, unknown, ref, n_rep, save_loc = NULL){
-  
-  # Initialise parallel processing
-  cl <- setup_parallel_backend()
-  
-  # Get a list of the sample id's
-  samples <- known |>
-    filter(sample_id %in% sample_docs) |>
-    pull(sample_id) |>
-    unique()
-  
-  result_df <- foreach(sample_id = samples, .combine = rbind, .packages = c('foreach', 'quanteda', 'dplyr', 'authorverifyr'), .export = c("sample_doc_to_corpus", "min_max_similarity")) %dopar% {
-    
-    # Filter the docs for the correct sample_id and convert to a corpus
-    known_corp <- sample_doc_to_corpus(known, sample_id)
-    unknown_corp <- sample_doc_to_corpus(unknown, sample_id)
-    ref_corp <- sample_doc_to_corpus(ref, sample_id)
-    
-    # Get the dfm matrix for each corpus
-    dfm_known <- character_n_grams(known_corp)
-    dfm_unknown <- character_n_grams(unknown_corp)
-    dfm_ref <- character_n_grams(ref_corp)
-    
-    # Get all of the known doc features, we will use 50% of these in the
-    # result
-    known_feats <- colnames(dfm_known)
-    
-    # Get the number of sentences in the known and unknown corpus
-    num_known_sentence <- ndoc(known_corp)
-    num_unknown_sentence <- ndoc(unknown_corp)
-    num_total_ref_sentences <- ndoc(ref_corp)
-    
-    # Create vectors of FALSE, we will replace each element with TRUE in a 
-    # loop to subset the dfms
-    base_known_false <- rep(FALSE, num_known_sentence)
-    base_unknown_false <- rep(FALSE, num_unknown_sentence)
-    
-    # Parallelize over known sentences
-    sample_result_df <- foreach(i = 1:num_known_sentence, .combine = rbind, .packages = c('foreach', 'quanteda', 'dplyr', 'authorverifyr'), .export = c("min_max_similarity", "dfm_subset", "dfm_match", "ndoc")) %dopar% {
-      
-      # subset the known dfm
-      updated_known_false <- replace(base_known_false, i, TRUE)
-      dfm_known_subset <- dfm_subset(dfm_known, updated_known_false)
-      known_docvars <- docvars(dfm_known_subset[1,])
-      
-      score_vec <- numeric(0)
-      
-      score_vec <- foreach(j = 1:num_unknown_sentence, .combine = "c", .packages = c('foreach', 'quanteda'), .export = c("min_max_similarity")) %dopar% {
-        # Subset the unknown dfm as we will be looping through this
-        updated_unknown_false <- replace(base_unknown_false, j, TRUE)
-        dfm_unknown_subset <- dfm_subset(dfm_unknown, updated_unknown_false)
-        
-        # Now we grab the chunk and subchunk from the docvars of the subset
-        docvar_selection <- docvars(dfm_unknown_subset[1,])
-        unknown_chunk_id <- docvar_selection$chunk_id
-        unknown_subchunk_id <- docvar_selection$subchunk_id
-        
-        # Use this info to subset the reference dfm
-        dfm_ref_subset <- dfm_subset(dfm_ref, chunk_id == unknown_chunk_id & subchunk_id == unknown_subchunk_id)
-        
-        # Get the number of paraphrases in order to set a score multiplier
-        num_subset_ref_sentences <- ndoc(dfm_ref_subset)
-        score_multiplier <- num_subset_ref_sentences / num_total_ref_sentences
-        
-        score_d_known <- 0
-        
-        # Repeat a number of times set by the user
-        for(k in 1:n_rep){
-          
-          # Select 50% of features
-          selected_feats <- sample(known_feats, size = length(known_feats) / 2)
-          
-          # Match the dfms with these features
-          known_matched <- dfm_match(dfm_known_subset, selected_feats)
-          unknown_matched <- dfm_match(dfm_unknown_subset, selected_feats)
-          ref_matched <- dfm_match(dfm_ref_subset, selected_feats)
-          
-          # Calculate the unknown score and create a vector of reference scores
-          score_unknown <- min_max_similarity(as.numeric(known_matched[1,]),
-                                              as.numeric(unknown_matched[1, ]))
-          
-          score_ref <- apply(ref_matched, 1, function(row) min_max_similarity(as.numeric(known_matched[1,]),
-                                                                              as.numeric(row)))
-          
-          # Combine reference score with unknown scores and rank them. Using ties.method = 'min'
-          # carries out skip ranking
-          all_scores <- c(score_unknown, score_ref)
-          ranking <- rank(-all_scores, ties.method = "min")
-          
-          # Get the rank of the unknown doc
-          pos <- ranking[1]
-          
-          # Increment the score with each repetition
-          score_d_known <- score_d_known + 1 / (n_rep * pos)
-          
-        }
-        
-        # Multiply the score by the score_multiplier and add it to the vectore with scores for all sentences
-        final_score <- score_d_known * score_multiplier
-        
-        # This is similar to return(final_score)
-        final_score
-      }
-      
-      
-      # Now we get the score for sentence i vs the entire unknown document
-      # I am summing instead of averaging as i'm essentially doing a weighted average by
-      # multiplying by the score_multiplier
-      sentence_score <- sum(score_vec)
-      
-      # Compute same_author value based on the sentence score
-      if (sentence_score < 0.5) {
-        same_author <- 0
-      } else if (sentence_score == 0.5) {
-        same_author <- 0.5
-      } else {
-        same_author <- 1
-      }
-      
-      sentence_info <- cbind(known_docvars, sentence_score, same_author)
-      
-      # Return the sentence information as rbind
-      sentence_info
-    }
-    
-    # Save after each document
-    if (!is.null(save_loc)) {
-      write.csv(result_df, file = save_loc, row.names = FALSE)
-    }
-    
-    # Return the sample_result_df
-    sample_result_df
-    
-  }
-  
-  # Stop the parallel backend
-  stop_parallel_backend(cl)
-  
-  return(result_df)
-}
-
-impostor_algorithm_parallel_all_loops <- function(known, unknown, ref, n_rep, save_loc = NULL){
-  
-  # Initialise parallel processing
-  cl <- setup_parallel_backend()
-  
-  # Get a list of the sample id's
-  samples <- known |>
-    filter(sample_id %in% sample_docs) |>
-    pull(sample_id) |>
-    unique()
-  
-  result_df <- foreach(sample_id = samples, .combine = rbind, .packages = c('foreach', 'quanteda', 'dplyr', 'authorverifyr'), .export = c("sample_doc_to_corpus", "min_max_similarity")) %dopar% {
-    
-    # Filter the docs for the correct sample_id and convert to a corpus
-    known_corp <- sample_doc_to_corpus(known, sample_id)
-    unknown_corp <- sample_doc_to_corpus(unknown, sample_id)
-    ref_corp <- sample_doc_to_corpus(ref, sample_id)
-    
-    # Get the dfm matrix for each corpus
-    dfm_known <- character_n_grams(known_corp)
-    dfm_unknown <- character_n_grams(unknown_corp)
-    dfm_ref <- character_n_grams(ref_corp)
-    
-    # Get all of the known doc features, we will use 50% of these in the
-    # result
-    known_feats <- colnames(dfm_known)
-    
-    # Get the number of sentences in the known and unknown corpus
-    num_known_sentence <- ndoc(known_corp)
-    num_unknown_sentence <- ndoc(unknown_corp)
-    num_total_ref_sentences <- ndoc(ref_corp)
-    
-    # Create vectors of FALSE, we will replace each element with TRUE in a 
-    # loop to subset the dfms
-    base_known_false <- rep(FALSE, num_known_sentence)
-    base_unknown_false <- rep(FALSE, num_unknown_sentence)
-    
-    # Parallelize over known sentences
-    sample_result_df <- foreach(i = 1:num_known_sentence, .combine = rbind, .packages = c('foreach', 'quanteda', 'dplyr', 'authorverifyr'), .export = c("min_max_similarity", "dfm_subset", "dfm_match", "ndoc")) %dopar% {
-      
-      # subset the known dfm
-      updated_known_false <- replace(base_known_false, i, TRUE)
-      dfm_known_subset <- dfm_subset(dfm_known, updated_known_false)
-      known_docvars <- docvars(dfm_known_subset[1,])
-      
-      score_vec <- numeric(0)
-      
-      score_vec <- foreach(j = 1:num_unknown_sentence, .combine = "c", .packages = c('foreach', 'quanteda'), .export = c("min_max_similarity")) %dopar% {
-        # Subset the unknown dfm as we will be looping through this
-        updated_unknown_false <- replace(base_unknown_false, j, TRUE)
-        dfm_unknown_subset <- dfm_subset(dfm_unknown, updated_unknown_false)
-        
-        # Now we grab the chunk and subchunk from the docvars of the subset
-        docvar_selection <- docvars(dfm_unknown_subset[1,])
-        unknown_chunk_id <- docvar_selection$chunk_id
-        unknown_subchunk_id <- docvar_selection$subchunk_id
-        
-        # Use this info to subset the reference dfm
-        dfm_ref_subset <- dfm_subset(dfm_ref, chunk_id == unknown_chunk_id & subchunk_id == unknown_subchunk_id)
-        
-        # Get the number of paraphrases in order to set a score multiplier
-        num_subset_ref_sentences <- ndoc(dfm_ref_subset)
-        score_multiplier <- num_subset_ref_sentences / num_total_ref_sentences
-        
-        score_d_known <- foreach(k = 1:n_rep, .combine = "+", .packages = c('foreach', 'quanteda', 'dplyr', 'authorverifyr'), .export = c("min_max_similarity", "dfm_match")) %dopar% {
-          
-          # Select 50% of features
-          selected_feats <- sample(known_feats, size = length(known_feats) / 2)
-          
-          # Match the dfms with these features
-          known_matched <- dfm_match(dfm_known_subset, selected_feats)
-          unknown_matched <- dfm_match(dfm_unknown_subset, selected_feats)
-          ref_matched <- dfm_match(dfm_ref_subset, selected_feats)
-          
-          # Calculate the unknown score and create a vector of reference scores
-          score_unknown <- min_max_similarity(as.numeric(known_matched[1,]),
-                                              as.numeric(unknown_matched[1, ]))
-          
-          score_ref <- apply(ref_matched, 1, function(row) min_max_similarity(as.numeric(known_matched[1,]),
-                                                                              as.numeric(row)))
-          
-          # Combine reference score with unknown scores and rank them. Using ties.method = 'min'
-          # carries out skip ranking
-          all_scores <- c(score_unknown, score_ref)
-          ranking <- rank(-all_scores, ties.method = "min")
-          
-          # Get the rank of the unknown doc
-          pos <- ranking[1]
-          
-          # Increment the score with each repetition and return it
-          1 / (n_rep * pos)
-          
-        }
-        
-        # Multiply the score by the score_multiplier and add it to the vectore with scores for all sentences
-        final_score <- score_d_known * score_multiplier
-        
-        # This is similar to return(final_score)
-        final_score
-      }
-      
-      
-      # Now we get the score for sentence i vs the entire unknown document
-      # I am summing instead of averaging as i'm essentially doing a weighted average by
-      # multiplying by the score_multiplier
-      sentence_score <- sum(score_vec)
-      
-      # Compute same_author value based on the sentence score
-      if (sentence_score < 0.5) {
-        same_author <- 0
-      } else if (sentence_score == 0.5) {
-        same_author <- 0.5
-      } else {
-        same_author <- 1
-      }
-      
-      sentence_info <- cbind(known_docvars, sentence_score, same_author)
-      
-      # Return the sentence information as rbind
-      sentence_info
-    }
-    
-    # Save after each document
-    if (!is.null(save_loc)) {
-      write.csv(result_df, file = save_loc, row.names = FALSE)
-    }
-    
-    # Return the sample_result_df
-    sample_result_df
-    
-  }
-  
-  # Stop the parallel backend
-  stop_parallel_backend(cl)
-  
   return(result_df)
 }
 
 #-----MEASURE THE TIME TAKEN TO DO 10 DOCS-----#
 
-# Completed initial investigation and the time taken for the unknown sentence function was quickest but a long time
-# I will repeat again to double check with the new function for both sentence loops.
-
 # Measure time for impostor_algorithm_parallel_sample
-print("Sample, Unknown Docs")
-time_sample <- system.time(result_sample <- impostor_algorithm_parallel_sample(known_docs, unknown_updated, ref_docs, n_rep = n_rep))
-write.csv(result_sample, "./test/sample_unknown.csv")
-
-print("Unknown Docs")
-# Measure time for impostor_algorithm_parallel_unknown
-time_unknown <- system.time(result_unknown <- impostor_algorithm_parallel_unknown(known_docs, unknown_updated, ref_docs, n_rep = n_rep))
-write.csv(result_unknown, "./test/unknown.csv")
-
-print("Sample, Unknown Docs, Known Docs")
-# Measure time for impostor_algorithm_parallel_3_loops
-time_3_loops <- system.time(result_3_loops <- impostor_algorithm_parallel_3_loops(known_docs, unknown_updated, ref_docs, n_rep = n_rep))
-write.csv(result_3_loops, "./test/sample_unknown_known.csv")
-# Measure time for impostor_algorithm_parallel_all_loops
-
-print("Sample, Unknown Docs, Known Docs")
-time_all_loops <- system.time(result_all_loops <- impostor_algorithm_parallel_all_loops(known_docs, unknown_updated, ref_docs, n_rep = n_rep))
-write.csv(result_all_loops, "./test/sample_unknown_known_rep.csv")
-
+time_parallel <- system.time(result_sample <- impostor_algorithm_parallel(known_docs, unknown_updated, ref_docs, n_rep = n_rep))
+write.csv(result_sample, "./test/new_parallel.csv")
 
 #-----STORE TIMINGS DATA TO CHECK WHICH ALGORITHM IS MOST EFFICIENT-----#
-
-# Store the times in a data frame
-time_results <- data.frame(
-  Function = c("Unknown Docs",
-               "Sample, Unknown Docs", 
-               "Sample, Unknown Docs, Known Docs", 
-               "Sample, Unknown Docs, Known Docs, Repetitions",
-               "Unknown Docs, Known Docs"),
-  User_Time = c(time_unknown["user.self"],
-                time_sample["user.self"], 
-                time_3_loops["user.self"], 
-                time_all_loops["user.self"],
-                time_sentence_loops["user.self"]),
-  System_Time = c(time_unknown["sys.self"],
-                  time_sample["sys.self"], 
-                  time_3_loops["sys.self"], 
-                  time_all_loops["sys.self"],
-                  time_sentence_loops["sys.self"]),
-  Elapsed_Time = c(time_unknown["elapsed"],
-                   time_sample["elapsed"], 
-                   time_3_loops["elapsed"], 
-                   time_all_loops["elapsed"],
-                   time_sentence_loops["elapsed"]))
-
-time_results <- time_results |>
-  arrange(Elapsed_Time) |>
-  mutate(Elapsed_Mins = Elapsed_Time / 60,
-         Difference_From_Best = round(Elapsed_Mins - min(Elapsed_Mins), 2))
-
-time_results
-
-write.csv(time_results, "./test/time_results.csv")
-
-#-----COMPARISON-----#
 
 # Compare the results of the result with known and unknown sentences with the originals
 original_results <- read.csv("./guardian_phi_results_10_reps.csv")
@@ -1294,3 +554,23 @@ original_results |>
   inner_join(result_sentence, by = c('sample_id', 'doc_id', 'chunk_id',
                                      'subchunk_id', 'author_id', 'topic_id')) |> 
   filter(same_author.x != same_author.y)
+
+
+dfm_unknown <- docs_to_corpus(unknown_updated)
+dfm_unknown <- character_n_grams(dfm_unknown)
+dfm_unknown <- dfm_subset(dfm_unknown, sample_id == 22)
+
+dfm_known <- docs_to_corpus(known_docs)
+dfm_known <- character_n_grams(dfm_known)
+dfm_known <- dfm_subset(dfm_known, sample_id == 22)
+
+feats <- top_n_features(dfm_known, dfm_unknown)
+
+unknown_matched <- dfm_match(dfm_unknown, feats)
+known_matched <- dfm_match(dfm_known, feats)
+
+test <- dfm_trim(rbind(known_matched, unknown_matched),
+         min_termfreq = 1,
+         termfreq_type = 'count')
+
+min_max_similarity(as.vector(test[1,]), as.vector(test[2,]))
