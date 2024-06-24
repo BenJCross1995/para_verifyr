@@ -268,7 +268,7 @@ sample_docs <- unknown_updated |>
   left_join((known_docs |> group_by(sample_id) |> summarise(num_known_chunks = n())), by = 'sample_id') |>
   mutate(total_combinations = num_unknown_chunks * 2 * num_unknown_chunks) |>
   arrange(total_combinations) |>
-  head(10) |>
+  # head(10) |>
   pull(sample_id)
 
 n_rep <- 5
@@ -532,7 +532,7 @@ impostor_algorithm_parallel <- function(known, unknown, ref, n_rep){
 }
 
 #-----IMPOSTOR ALGORITHM DOUBLE ARALLEL-----#
-impostor_algorithm_inner_parallel <- function(known, unknown, ref, n_rep){
+impostor_algorithm_inner_parallel <- function(known, unknown, ref, n_rep, save_loc=NULL){
   
   # Initialise parallel processing
   cl <- setup_parallel_backend()
@@ -584,7 +584,7 @@ impostor_algorithm_inner_parallel <- function(known, unknown, ref, n_rep){
       
       score_vec <- numeric(0)
       
-      for(j in 1:num_known_sentence){
+      score_vec <- foreach(j = 1:num_known_sentence, .combine = "c", .packages = c('foreach', 'quanteda'), .export = c("min_max_similarity")) %dopar% {
         
         dfm_known_subset <- dfm_known_sample[j,]
         
@@ -633,7 +633,7 @@ impostor_algorithm_inner_parallel <- function(known, unknown, ref, n_rep){
           
         }
         # This is similar to return(final_score)
-        score_vec <- c(score_vec, score_d_known)
+        score_d_known
       }
       
       # Now we get the score for sentence i vs the entire unknown document
@@ -656,6 +656,12 @@ impostor_algorithm_inner_parallel <- function(known, unknown, ref, n_rep){
     }
     # Return the sentence information as rbind
     result_df <- rbind(result_df, sample_result_df)
+    
+    # Save after each document
+    if (!is.null(save_loc)) {
+      write.csv(result_df, file = save_loc, row.names = FALSE)
+    }
+    
   }
   stop_parallel_backend(cl)
   return(result_df)
@@ -670,35 +676,17 @@ impostor_algorithm_inner_parallel <- function(known, unknown, ref, n_rep){
 # time_parallel <- system.time(result_new <- impostor_algorithm_parallel(known_docs, unknown_updated, ref_docs, n_rep = n_rep))
 # write.csv(result_new, "./test/new_parallel.csv")
 
+# Measure time for impostor_algorithm_parallel_sample
+time_inner_parallel <- system.time(
+  result_inner_parallel <- impostor_algorithm_inner_parallel(known_docs,
+                                                             unknown_updated,
+                                                             ref_docs,
+                                                             n_rep = n_rep,
+                                                             save_loc = "./test/new_impostor_full.csv"))
+write.csv(result_new, "./test/new_inner_parallel_full.csv")
 
 
 #-----STORE TIMINGS DATA TO CHECK WHICH ALGORITHM IS MOST EFFICIENT-----#
 
 # Compare the results of the result with known and unknown sentences with the originals
-original_results <- read.csv("./guardian_phi_results_10_reps.csv")
-
-# Just want to see which final results differ and by how much
-original_results |> 
-  inner_join(result_sentence, by = c('sample_id', 'doc_id', 'chunk_id',
-                                     'subchunk_id', 'author_id', 'topic_id')) |> 
-  filter(same_author.x != same_author.y)
-
-
-dfm_unknown <- docs_to_corpus(unknown_updated)
-dfm_unknown <- character_n_grams(dfm_unknown)
-dfm_unknown <- dfm_subset(dfm_unknown, sample_id == 22)
-
-dfm_known <- docs_to_corpus(known_docs)
-dfm_known <- character_n_grams(dfm_known)
-dfm_known <- dfm_subset(dfm_known, sample_id == 22)
-
-feats <- top_n_features(dfm_known, dfm_unknown)
-
-unknown_matched <- dfm_match(dfm_unknown, feats)
-known_matched <- dfm_match(dfm_known, feats)
-
-test <- dfm_trim(rbind(known_matched, unknown_matched),
-         min_termfreq = 1,
-         termfreq_type = 'count')
-
-min_max_similarity(as.vector(test[1,]), as.vector(test[2,]))
+# original_results <- read.csv("./guardian_phi_results_10_reps.csv")
