@@ -9,7 +9,6 @@ suppressPackageStartupMessages({
   library(doParallel)
   library(tidyr)
 })
-
 # Get command-line arguments
 args <- commandArgs(trailingOnly = TRUE)
 
@@ -428,3 +427,4 @@ impostor_algorithm_inner_parallel(known_docs,
                                   n_rep = num_rep,
                                   save_loc = save_loc,
                                   sample_size = sample_size)
+
