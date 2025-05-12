@@ -11,6 +11,8 @@ base <- "/Users/user/Documents/datasets/blogger/raw_error_fix/"
 unknown_loc <- paste0(base, "known_final.jsonl") # Got known and unknown wrong way around compare to impostors
 known_loc <- paste0(base, "unknown_final.jsonl") # Got known and unknown wrong way around compare to impostors
 impostor_loc <- paste0(base, "phi_impostor_paragraphs_noqual.jsonl")
+gpt_4o_loc <- "/Users/user/Documents/datasets/blogger/gpt-4o-impostors-no-qual.jsonl"
+gpt_4o_qual_loc <- "/Users/user/Documents/datasets/blogger/gpt-4o-impostors-qual.jsonl"
 metadata_loc <- paste0(base, "metadata.jsonl")
 general_impostor_loc <- paste0(base, "general_impostors_final.jsonl")
 raw_filtered_for_authors <- paste0(base, "raw_filtered_authors.jsonl")
@@ -30,17 +32,37 @@ metadata <- read_jsonl(metadata_loc)
 # impostors <- read_jsonl(impostor_loc) |> sample_id_from_metadata(metadata, df_type = "x") |>
 #   dplyr::rename('text' = 'rephrased') |>
 #   convert_to_dfm()
+# gpt_4o_impostors <- read_jsonl(gpt_4o_loc) |> sample_id_from_metadata(metadata, df_type = "x") |>
+#   dplyr::rename('text' = 'rephrased') |>
+#   convert_to_dfm()
+gpt_4o_qual_impostors <- read_jsonl(gpt_4o_qual_loc) |> sample_id_from_metadata(metadata, df_type = "x") |>
+  dplyr::rename('text' = 'rephrased') |>
+  dplyr::group_by(sample_id) |>
+  dplyr::arrange(desc(average_score)) |>
+  dplyr::slice_head(n = 500) %>%
+  dplyr::ungroup()
+
+
+gpt_4o_qual_impostors |>
+  ggplot(aes(x = average_score)) +
+  geom_density() +
+  ggtitle("Density plot of ParaScore for the Top 500 impostors for each sample")
+
+gpt_4o_qual_impostors <- convert_to_dfm(gpt_4o_qual_impostors)
+
 # general_impostors <- read_jsonl(general_impostor_loc) |>
 #   convert_to_dfm()
 
 # This is the raw dataframe with any authors from the metadata filtered out.
-raw_before_top_impostors <- read_jsonl(raw_filtered_for_authors) |>
-  convert_to_dfm()
+# raw_before_top_impostors <- read_jsonl(raw_filtered_for_authors) |>
+#   convert_to_dfm()
 # 
 # saveRDS(known, paste0(base, 'dfm/known_dfm.rds'))
 # saveRDS(unknown, paste0(base, 'dfm/unknown_dfm.rds'))
 # saveRDS(impostors, paste0(base, 'dfm/para_impostors_dfm.rds'))
 # saveRDS(general_inpostors, paste0(base, 'dfm/general_impostors_dfm.rds'))
+# saveRDS(gpt_4o_impostors, paste0(base, 'dfm/para_gpt_4o_impostors_dfm.rds'))
+# saveRDS(gpt_4o_qual_impostors, paste0(base, 'dfm/para_gpt_4o_qual_dfm.rds'))
 
 # -----READ IN RDS FILES----- #
 
@@ -49,59 +71,43 @@ raw_before_top_impostors <- read_jsonl(raw_filtered_for_authors) |>
 
 known <- readRDS(paste0(base, 'dfm/known_dfm.rds'))
 unknown <- readRDS(paste0(base, 'dfm/unknown_dfm.rds'))
-para_impostors <- readRDS(paste0(base, 'dfm/para_impostors_dfm.rds'))
+# para_impostors <- readRDS(paste0(base, 'dfm/para_impostors_dfm.rds'))
 # general_impostors <- readRDS(paste0(base, 'dfm/general_impostors_dfm.rds'))
-
-
-top_impostors <- function(dfm_x, dfm_ref, num_top = 500){
-
-  # Weight the dfm matrices
-  x_weighted <- dfm_x |> quanteda::dfm_weight(scheme='prop')
-  imp_weighted <- dfm_ref |> quanteda::dfm_weight(scheme='prop')
-
-  # Get the union of the features
-  feats <- union(featnames(x_weighted), featnames(imp_weighted))
-  
-  # Transpose the padded dfm's
-  x_t <- t(quanteda:::pad_dfm(x_weighted, feats))
-  imp_t <- t(quanteda:::pad_dfm(imp_weighted, feats))
-
-  # Get the similarities of the impostors compared to x 
-  test <- proxyC::simil(x_t, imp_t, margin = 2, method = "fjaccard") # Highest score most similar
-  
-  ranking <- rank(as.matrix(test), ties.method = "max")
-  docs_to_keep <- which(ranking > nrow(dfm_ref) - num_top)
-  
-  # Docs selected
-  imp_selected <- dfm_ref[docs_to_keep,]
-  
-  return(imp_selected)
-}
+# gpt_4o_imp <- readRDS(paste0(base, 'dfm/para_gpt_4o_impostors_dfm.rds'))
+# gpt_4o_qual_imp <- readRDS(paste0(base, 'dfm/para_gpt_4o_qual_dfm.rds'))
 
 # -----TOP IMPOSTORS PREPROCESSING BEFORE IMPOSTOR METHOD----- #
 
 # Keep only the top n most similar impostors to the known docs then save the dfm.
 # most_relevant_top <- preprocess_dfm(known, general_impostors)
 
-# Impostors from the ENTIRE set of possibles
-most_relevent_top_entire_selection <- preprocess_dfm(known, raw_before_top_impostors)
+# -----IMPOSTORS FROM ENTIRE SET OF POSSIBILITIES----- #
+# max_sim_impostors <- preprocess_dfm(known, raw_before_top_impostors)
+# saveRDS(max_sim_impostors, paste0(base, "dfm/max_sim_impostors.rds"))
+# max_sim_impostors <- readRDS(paste0(base, "dfm/max_sim_impostors.rds"))
+
 # saveRDS(most_relevant_top, paste0(base, "general_ref_dfm.rds"))
-ref_impostors <- readRDS(paste0(base, "general_ref_dfm.rds"))
+#ref_impostors <- readRDS(paste0(base, "general_ref_dfm.rds"))
 
 # -----RUN THE TEST----- #
 
 # The code below runs the test 5 times and saves the results to 5 different locations.
 
+docs_gpt_4o <- docvars(gpt_4o_qual_impostors)['sample_id'] |> unique() |> pull() |> as.numeric()
+known_filtered <- dfm_subset(known, sample_id %in% docs_gpt_4o)
+unknown_filtered <- dfm_subset(unknown, sample_id %in% docs_gpt_4o)
+
 for (i in 1:5) {
   # Run the function
-  results_vs_known_rep <- rank_based_impostors(known, unknown, ref_impostors,
+  results_vs_known_rep <- rank_based_impostors(known_filtered, unknown_filtered, gpt_4o_qual_impostors,
                                                num_feats = 100000,
                                                num_repetitions = 100,
                                                num_impostors = 100)
   
   # Construct the filename
-  filename <- paste0(base, "results_ref_", i, ".jsonl")
+  filename <- paste0(base, "/gpt_4o_results/results_gpt_4o_qual", i, ".jsonl")
   
   # Save the result
   save_jsonl(results_vs_known_rep, filename)
 }
+
