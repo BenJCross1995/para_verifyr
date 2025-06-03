@@ -8,9 +8,9 @@ library(Metrics)
 
 base_loc <- "/Volumes/BCross/datasets/author_verification"
 
-read_results_from_folder <- function(base_loc, data_type, corpus, results_type){
+read_results_from_folder <- function(base_loc, data_type, corpus, model_desc, results_type){
   
-  folder_path <- paste0(base_loc, "/", data_type, "/", corpus, "/gpt_4o_mini_full/", results_type)
+  folder_path <- paste0(base_loc, "/", data_type, "/", corpus, "/", model_desc, "/", results_type)
   
   # -----LIST RESULTS----- #
   rds_files <- list.files(path = folder_path, pattern = "\\.rds$", full.names = TRUE)
@@ -37,20 +37,27 @@ read_results_from_folder <- function(base_loc, data_type, corpus, results_type){
 }
 
 # Enron
-enron_aggregated <- read_results_from_folder(base_loc, "training", 'Enron', "aggregated_results")
-enron_profile <- read_results_from_folder(base_loc, "training", 'Enron', "profile_results")
-enron_profile_andrea_im <- read_results_from_folder(base_loc, "training", "Enron", "profile_results_andrea_im")
+enron_aggregated <- read_results_from_folder(base_loc, "training", 'Enron', "gpt_4o_mini_full", "aggregated_results")
+enron_profile <- read_results_from_folder(base_loc, "training", 'Enron', "gpt_4o_mini_full", "profile_results")
+enron_profile_andrea_im <- read_results_from_folder(base_loc, "training", "Enron", "gpt_4o_mini_full", "profile_results_andrea_im")
 ## LambdaG
-enron_aggregated_lambda_g <- read_results_from_folder(base_loc, 'training', 'Enron', 'aggregated_results_andrea_lambdag')
-enron_profile_lambda_g <- read_results_from_folder(base_loc, 'training', 'Enron', 'profile_results_andrea_lambdag')
+enron_aggregated_lambda_g <- read_results_from_folder(base_loc, 'training', 'Enron', "gpt_4o_mini_full", 'aggregated_results_andrea_lambdag')
+enron_profile_lambda_g <- read_results_from_folder(base_loc, 'training', 'Enron', "gpt_4o_mini_full", 'profile_results_andrea_lambdag')
 
 # Wiki
-wiki_aggregated <- read_results_from_folder(base_loc, "training", 'Wiki', "aggregated_results")
-wiki_profile <- read_results_from_folder(base_loc, "training", 'Wiki', "profile_results")
-wiki_profile_andrea_im <- read_results_from_folder(base_loc, "training", "Wiki", "profile_results_andrea_im")
+wiki_aggregated <- read_results_from_folder(base_loc, "training", 'Wiki', "gpt_4o_mini_full", "aggregated_results")
+wiki_profile <- read_results_from_folder(base_loc, "training", 'Wiki', "gpt_4o_mini_full", "profile_results")
+wiki_profile_andrea_im <- read_results_from_folder(base_loc, "training", "Wiki", "gpt_4o_mini_full", "profile_results_andrea_im")
 ## LambdaG
-wiki_aggregated_lambda_g <- read_results_from_folder(base_loc, 'training', 'Wiki', 'aggregated_results_andrea_lambdag')
-wiki_profile_lambda_g <- read_results_from_folder(base_loc, 'training', 'Wiki', 'profile_results_andrea_lambdag')
+wiki_aggregated_lambda_g <- read_results_from_folder(base_loc, 'training', 'Wiki', "gpt_4o_mini_full", 'aggregated_results_andrea_lambdag')
+wiki_profile_lambda_g <- read_results_from_folder(base_loc, 'training', 'Wiki', "gpt_4o_mini_full", 'profile_results_andrea_lambdag')
+
+## QWEN
+qwen_wiki_agg_lambdaG <- read_results_from_folder(base_loc, 'training', 'Wiki', "Qwen_2.5_1.5B", 'results_agg_lambdag')
+qwen_wiki_pro_lambdaG <- read_results_from_folder(base_loc, 'training', 'Wiki', "Qwen_2.5_1.5B", 'results_profile_lambdag')
+qwen_wiki_agg_imp <- read_results_from_folder(base_loc, 'training', 'Wiki', "Qwen_2.5_1.5B", 'results_agg_impostors')
+qwen_wiki_pro_imp <- read_results_from_folder(base_loc, 'training', 'Wiki', "Qwen_2.5_1.5B", 'results_profile_impostors')
+
 
 aggregated_results <- function(df){
   
@@ -99,9 +106,37 @@ enron_profile_andrea_im_results <- looped_performance_results(enron_profile_andr
 enron_aggregated_lambda_g_results <- looped_performance_results(enron_aggregated_lambda_g)
 enron_profile_lambda_g_results <- looped_performance_results(enron_profile_lambda_g)
 
-results_df <- rbind(wiki_profile_results, wiki_profile_andrea_im_results, wiki_profile_lambda_g_results, wiki_aggregated_results, wiki_aggregated_lambda_g_results,
-                    enron_profile_results, enron_profile_andrea_im_results, enron_profile_lambda_g_results, enron_aggregated_results, enron_aggregated_lambda_g_results)
-results_df
+## QWEN
+qwen_wiki_agg_lambdaG_results <- looped_performance_results(qwen_wiki_agg_lambdaG)
+qwen_wiki_pro_lambdaG_results <- looped_performance_results(qwen_wiki_pro_lambdaG)
+qwen_wiki_agg_imp_results <- looped_performance_results(qwen_wiki_agg_imp)
+qwen_wiki_pro_imp_results <- looped_performance_results(qwen_wiki_pro_imp)
+
+results_df <- rbind(wiki_profile_results, wiki_profile_andrea_im_results, qwen_wiki_pro_imp_results, wiki_aggregated_results, qwen_wiki_agg_imp_results, 
+                    wiki_profile_lambda_g_results, qwen_wiki_pro_lambdaG_results, wiki_aggregated_lambda_g_results, qwen_wiki_agg_lambdaG_results,
+                    enron_profile_results, enron_profile_andrea_im_results, enron_aggregated_results, enron_profile_lambda_g_results, enron_aggregated_lambda_g_results)
+
+results_df |>
+  select(-data_type) |>
+  mutate(result_type = ifelse(result_type == 'profile_results', 'profile_imp', 'profile_andrea_imp'))
+
+# Impostor Comparison
+results_df |>
+  select(-data_type) |>
+  mutate(
+    result_type = case_when(
+      result_type == "profile_results"             ~ "profile_imp",
+      result_type == "profile_results_andrea_im"   ~ "profile_andrea_imp",
+      result_type == "profile_results_andrea_lambdag" ~ "profile_lambdaG",
+      result_type == "aggregated_results_andrea_lambdag" ~ "agg_lambdaG",
+      result_type == "results_agg_impostors" ~ "Qwen_agg_imp",
+      result_type == "results_profile_impostors" ~ "Qwen_profile_imp",
+      result_type == "results_agg_lambdag" ~ "Qwen_agg_lambdaG",
+      result_type == "results_profile_lambdag" ~ "Qwen_profile_lambdaG",
+      result_type == "aggregated_results" ~ "agg_imp",
+      TRUE                                         ~ result_type      # keep original for all other cases
+    )
+  )
 
 # aggregated_results(wiki_profile)
 # # -----ADD THRESHOLDS----- #

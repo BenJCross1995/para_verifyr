@@ -55,9 +55,8 @@ create_temp_doc_id <- function(input_text) {
 # Input variables
 # selected_corpus since column called corpus in metadata
 base_loc <- "/Volumes/BCross/datasets/author_verification"
-base_loc <- "/Volumes/ExternalHDD/cloud_backup/datasets/author_verification"
 data_type <- "training"
-corpus <- "Enron"
+corpus <- "Wiki"
 
 # Locations
 data_loc <- paste0(base_loc, "/", data_type, "/", corpus)
@@ -65,11 +64,13 @@ data_loc <- paste0(base_loc, "/", data_type, "/", corpus)
 known_loc <- paste0(data_loc, "/known_raw.jsonl")
 unknown_loc <- paste0(data_loc, "/unknown_raw.jsonl")
 metadata_loc <-paste0(base_loc, "/", data_type, "/metadata.rds")
-impostors_loc <- paste0(data_loc, "/gpt_4o_mini_full/full_doc_parascore")
+impostors_loc <- paste0(data_loc, "/Qwen_2.5_1.5B/top_impostors")
 # impostors_loc <- paste0(data_loc, "/gpt_4o_mini_full/impostor_profile_top_impostors")
-features_loc <- paste0(data_loc, "/gpt_4o_mini_full/feature_list.rds")
-# result_save_loc <- paste0(data_loc, "/gpt_4o_mini_full/profile_results_andrea_im")
-result_save_loc <- paste0(data_loc, "/gpt_4o_mini_full/aggregated_results_andrea_lambdag")
+# features_loc <- paste0(data_loc, "/gpt_4o_mini_full/feature_list.rds")
+# LambdaG
+result_save_loc <- paste0(data_loc, "/Qwen_2.5_1.5B/aggregated_results_lambdag")
+# Impostors
+result_save_loc <- paste0(data_loc, "/Qwen_2.5_1.5B/aggregated_results_impostors")
 
 if (!dir.exists(result_save_loc)) {
   dir.create(result_save_loc, recursive = TRUE)
@@ -127,16 +128,23 @@ for(s in sample_ids){
   final_result <- data.frame()
   
   for(kd in known_docs){
+    print(paste0("Known Document: ", kd))
     known_subset = quanteda::corpus_subset(known_corpus, temp_id == kd)
+
+    impostor_file_path <- paste0(impostors_loc, "/", kd, ".jsonl")
     
-    impostor_text <- read_jsonl(paste0(impostors_loc, "/", kd, ".jsonl")) |>
+    # Try both methods to read the file
+    impostor_text <- tryCatch(
+      read_jsonl(impostor_file_path),
+      error = function(e) read_jsonl_stream(impostor_file_path)
+    ) |>
       arrange(desc(parascore_free)) |>
-      head(500) |>
+      slice_head(n = 500) |>
       select(corpus, author, texttype, rephrased) |>
-      rename('text'='rephrased')
-    
+      rename(text = rephrased)
+
     impostor_corpus <- corpus(impostor_text)
-    
+
     for(i in 1:nrow(impostor_text)){
       docvars(impostor_corpus)$author[i] <- paste0('impostor_', i)
     }
@@ -148,9 +156,9 @@ for(s in sample_ids){
 
     for(i in 1:5){
       print(paste0("Repetition: ", i))
-      # result <- impostors(unknown_corpus, known_corpus, impostor_corpus,
-      #                     algorithm = "RBI", k = 100, features=FALSE, cores=7)
-      result <- idiolect::lambdaG(unknown_sents, known_sents, impostor_sents)
+      result <- impostors(unknown_corpus, known_corpus, impostor_corpus,
+                          algorithm = "RBI", k = 100, features=FALSE, cores=7)
+      # result <- idiolect::lambdaG(unknown_sents, known_sents, impostor_sents)
       
       result_df <- cbind('known_doc' = kd, 'repetition' = i, problem, known_author, unknown_author, result) |>
         select(known_doc, repetition, problem, known_author, unknown_author, score)
